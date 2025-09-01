@@ -1,4 +1,8 @@
 name: LMArena → JSON (hourly)
+
+permissions:
+  contents: write
+
 on:
   schedule: [ { cron: "0 * * * *" } ]  # hourly
   workflow_dispatch:
