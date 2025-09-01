@@ -1,0 +1,85 @@
+name: LMArena → JSON (hourly)
+on:
+  schedule: [ { cron: "0 * * * *" } ]  # hourly
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Convert latest LMArena CSV release → JSON top10
+        run: |
+          python3 - << 'PY'
+          import json, os, re, sys, csv, io, urllib.request
+          import datetime
+
+          # 1) get latest release metadata (no auth) for daily CSVs:
+          #    https://github.com/fboulnois/llm-leaderboard-csv/releases (daily)
+          #    We’ll pick the LMArena CSV asset heuristically.
+          api = "https://api.github.com/repos/fboulnois/llm-leaderboard-csv/releases/latest"
+          req = urllib.request.Request(api, headers={"User-Agent": "ha-lmarena-json"})
+          meta = json.load(urllib.request.urlopen(req, timeout=20))
+
+          # pick a CSV that looks like the main arena table
+          asset = None
+          for a in meta.get("assets", []):
+            name = a.get("name","").lower()
+            if name.endswith(".csv") and ("lmarena" in name or "arena" in name):
+              asset = a["browser_download_url"]
+              break
+          if not asset:
+            raise SystemExit("No suitable CSV asset found in latest release")
+
+          # 2) download the CSV
+          csv_bytes = urllib.request.urlopen(asset, timeout=30).read()
+          text = csv_bytes.decode("utf-8", errors="replace")
+
+          # 3) parse & normalize
+          rows = list(csv.DictReader(io.StringIO(text)))
+          # try to locate score/model fields regardless of exact headers
+          def pick(d, *keys):
+            for k in keys:
+              if k in d: return d[k]
+              # case-insensitive match
+              for kk in d:
+                if kk.lower() == k.lower(): return d[kk]
+            return None
+
+          cleaned = []
+          for r in rows:
+            model = pick(r, "Model", "model", "Model Name", "model_name")
+            score = pick(r, "Score", "score", "Elo", "elo", "Arena Score", "arena_score")
+            try:
+              s = float(re.sub(r"[^\d\.\-]", "", str(score)))
+            except:
+              continue
+            if model:
+              cleaned.append({"Model": model.strip(), "Score": s})
+
+          cleaned.sort(key=lambda x: x["Score"], reverse=True)
+          top = cleaned[:10]
+
+          payload = {
+            "leaderboard": "lmarena",
+            "as_of": datetime.datetime.utcnow().isoformat() + "Z",
+            "models": [
+              {"Rank": i+1, **r} for i, r in enumerate(top)
+            ]
+          }
+
+          os.makedirs(".", exist_ok=True)
+          with open("lmarena_top10.json", "w") as f:
+            json.dump(payload, f, ensure_ascii=False)
+          PY
+
+      - name: Commit JSON
+        run: |
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git config user.name "github-actions"
+            git config user.email "actions@users.noreply.github.com"
+            git add lmarena_top10.json
+            git commit -m "update: lmarena_top10.json"
+            git push
+          fi
